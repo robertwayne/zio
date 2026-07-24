@@ -513,12 +513,9 @@ pub const Executor = struct {
     pub fn maybeYield(self: *Executor, comptime mode: AnyTask.YieldMode, comptime cancel_mode: YieldCancelMode) if (cancel_mode == .allow_cancel) Cancelable!void else void {
         // Cancellation is observed even on the fast path, so a CPU-bound loop
         // that only calls maybeYield() reacts to cancel promptly, like yield().
+        // Must not touch task.state on the error return (see AnyTask.yield).
         if (cancel_mode == .allow_cancel) {
-            const task = getCurrentTask();
-            task.checkCancel() catch |err| {
-                task.state.store(.{ .tag = .ready }, .release);
-                return err;
-            };
+            try getCurrentTask().checkCancel();
         }
         // Pure time-slice check: each call spends a quantum of the tick budget,
         // and only when the slice is used up does a real yield happen (letting
@@ -822,8 +819,13 @@ pub const Executor = struct {
                 // Task is in .ready state (running or about to park).
                 // Set the awaken bit as a park token; processCleanup.park will consume it
                 // and reschedule the task instead of transitioning to .waiting.
+                // The CAS runs even when the token is already set (rewriting the
+                // same value): a coalescing waker must still join the release
+                // sequence on `state`, or the parker's token-consume would not
+                // synchronize with it and the payload published before this wake
+                // (a notify count, a result) could be invisible to the recheck
+                // after the reschedule.
                 .ready => {
-                    if (old.awaken) return; // Token already set, nothing to do
                     const desired = AnyTask.State{ .tag = .ready, .awaken = true };
                     if (task.state.cmpxchgWeak(old, desired, .acq_rel, .acquire)) |actual| {
                         old = actual;
@@ -1003,10 +1005,8 @@ pub fn yield() Cancelable!void {
         exec.run_queue.isEmpty() and exec.run_queue.overflow.isEmpty() and
         exec.main_task.state.load(.acquire).tag != .ready)
     {
-        task.checkCancel() catch |err| {
-            task.state.store(.{ .tag = .ready }, .release);
-            return err;
-        };
+        // Must not touch task.state on the error return (see AnyTask.yield).
+        try task.checkCancel();
         exec.spendQuantum();
         return;
     }

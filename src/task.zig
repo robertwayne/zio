@@ -271,12 +271,14 @@ pub const AnyTask = struct {
         var executor = getCurrentExecutor();
 
         // Check and consume cancellation flag before yielding (unless no_cancel).
-        // On cancel: restore clean .ready state (clearing any awaken bit) before returning.
+        // On the cancel-error return, `state` must be left untouched: the tag is
+        // already .ready (we are running), and the awaken bit may hold a wake
+        // token set by a concurrent signal whose payload a cleanup path still
+        // has to observe (e.g. lockSlow's no_cancel wait for an in-flight
+        // signal). Clearing it here would strand that wake; a leftover token
+        // only costs one spurious reschedule at the next park.
         if (cancel_mode == .allow_cancel) {
-            self.checkCancel() catch |err| {
-                self.state.store(.{ .tag = .ready }, .release);
-                return err;
-            };
+            try self.checkCancel();
         }
 
         // Set up deferred cleanup — state transition happens after context is saved
