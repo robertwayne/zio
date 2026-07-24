@@ -132,7 +132,7 @@ pub fn wake(self: *Self, state: *LoopState) void {
                 switch (posix.errno(rc)) {
                     .SUCCESS => break,
                     .INTR => {
-                        log.warn("poll: waker write interrupted (EINTR), retrying", .{});
+                        std.debug.print("poll: waker write interrupted (EINTR), retrying\n", .{});
                         continue;
                     },
                     // Full pipe: the pending bytes already make the fd readable.

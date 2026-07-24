@@ -1502,8 +1502,11 @@ pub const Loop = struct {
         // poll running to full expiry is the stall signature. The flag value
         // discriminates: nonzero means a wake was requested but its event never
         // arrived (failed/skipped syscall); zero means no waker acted at all.
+        // std.debug.print, not log: the test runner captures and discards logs
+        // of passing tests.
         if (timed_out and effective_timeout.value >= Duration.fromSeconds(10).value) {
-            log.warn("blocking poll expired after {d}ms (wake_requested=0x{x})", .{
+            std.debug.print("loop {*}: blocking poll expired after {d}ms (wake_requested=0x{x})\n", .{
+                self,
                 effective_timeout.toMilliseconds(),
                 self.state.wake_requested.load(.monotonic),
             });
