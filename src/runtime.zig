@@ -659,27 +659,7 @@ pub const Executor = struct {
         }
 
         const found_work = self.checkAboutForWork(check_ready, true);
-        const slept_from = Timestamp.now(.monotonic);
         try self.loop.run(if (found_work) .no_wait else .once);
-
-        // TEMPORARY diagnostics (macos-arm64 lost-wake stalls): after an
-        // anomalously long sleep, dump what this executor can see. A non-empty
-        // overflow queue here means a task sat runnable the whole time with no
-        // announcement reaching us.
-        const slept_ns = Timestamp.now(.monotonic).toNanoseconds() -| slept_from.toNanoseconds();
-        if (slept_ns > 10_000_000_000) {
-            const main_state = self.main_task.state.load(.acquire);
-            std.debug.print("executor {d} woke after {d}ms: ring_empty={} overflow_len={d} main={t} awaken={} idle_mask=0x{x} searchers={d}\n", .{
-                self.id,
-                @divTrunc(slept_ns, 1_000_000),
-                self.run_queue.isEmpty(),
-                self.run_queue.overflow.len(),
-                main_state.tag,
-                main_state.awaken,
-                self.runtime.idle_mask.load(.monotonic),
-                self.runtime.searchers.load(.monotonic),
-            });
-        }
 
         const previous_bit = self.runtime.idle_mask.fetchAnd(~my_bit, .acq_rel);
 

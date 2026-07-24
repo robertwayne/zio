@@ -200,10 +200,7 @@ pub fn wake(self: *Self, state: *LoopState) void {
         const rc = std.c.kevent(self.kqueue_fd, &changes, 1, &.{}, 0, null);
         switch (posix.errno(rc)) {
             .SUCCESS => return,
-            .INTR => {
-                std.debug.print("kqueue: waker NOTE_TRIGGER interrupted (EINTR), retrying\n", .{});
-                continue;
-            },
+            .INTR => continue,
             else => |err| std.debug.panic("kqueue: waker NOTE_TRIGGER failed: {t}", .{err}),
         }
     }

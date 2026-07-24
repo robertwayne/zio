@@ -124,17 +124,13 @@ pub fn wake(self: *Self, state: *LoopState) void {
             };
         },
         else => {
-            // Raw write, not fs.write: the waker needs no cancel bracket and
-            // fs.write's internal EINTR retry would hide the interruption we
-            // want to observe.
+            // Raw write, not fs.write: the waker runs on any thread and needs
+            // neither the cancel bracket nor its error surface.
             while (true) {
                 const rc = posix.system.write(self.waker_write_fd, &byte, byte.len);
                 switch (posix.errno(rc)) {
                     .SUCCESS => break,
-                    .INTR => {
-                        std.debug.print("poll: waker write interrupted (EINTR), retrying\n", .{});
-                        continue;
-                    },
+                    .INTR => continue,
                     // Full pipe: the pending bytes already make the fd readable.
                     .AGAIN => break,
                     else => |err| std.debug.panic("poll: waker write failed: {t}", .{err}),

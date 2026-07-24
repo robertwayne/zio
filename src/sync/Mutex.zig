@@ -332,12 +332,18 @@ test "Mutex cancellation while parked under churn" {
 test "Mutex repeated cancellation generations under churn" {
     if (@import("builtin").single_threaded) return error.SkipZigTest;
 
-    // Regression stress for a lost wakeup that shows up as a rare hang of the
-    // test above on weakly ordered CPUs (Apple Silicon, release mode). The
-    // suspected mechanism: yield's cancel-error path clears the awaken bit
-    // with a blind store, erasing a wake token set by unlock's pop+signal;
-    // the no_cancel wait in lockSlow's cancel path then reads a stale signal
-    // count and parks with no wake left in flight.
+    // Regression stress for lost wakeups on weakly ordered CPUs (both found
+    // via this test hanging or stalling on Apple Silicon in release mode):
+    //
+    // 1. yield's cancel-error path used to clear the awaken bit with a blind
+    //    store, erasing a wake token set by unlock's pop+signal; the
+    //    no_cancel wait in lockSlow's cancel path then read a stale signal
+    //    count and parked forever with no wake left in flight.
+    // 2. the scheduler's idle/searcher announce handshake used
+    //    weaker-than-seq_cst orderings, so a pusher could drop its announce
+    //    while the idle executor's final work check predated the push,
+    //    stranding a runnable task until an unrelated poll timeout (~60s
+    //    stalls under this churn pattern).
     //
     // Every canceled victim is one roll of the dice, so cancel victims in
     // many short generations instead of once. On a buggy runtime a victim

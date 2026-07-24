@@ -1495,22 +1495,7 @@ pub const Loop = struct {
         // This avoids syscall overhead for pure CPU-bound workloads.
         const should_poll = wait or self.backend.hasInflight();
         const wake_flags = self.state.wake_requested.swap(0, .acq_rel);
-        const effective_timeout: Duration = if (wake_flags != 0) .zero else timeout;
-        const timed_out = if (should_poll) try self.backend.poll(&self.state, effective_timeout) else false;
-
-        // TEMPORARY diagnostics (macos-arm64 lost-wake stalls): a long blocking
-        // poll running to full expiry is the stall signature. The flag value
-        // discriminates: nonzero means a wake was requested but its event never
-        // arrived (failed/skipped syscall); zero means no waker acted at all.
-        // std.debug.print, not log: the test runner captures and discards logs
-        // of passing tests.
-        if (timed_out and effective_timeout.value >= Duration.fromSeconds(10).value) {
-            std.debug.print("loop {*}: blocking poll expired after {d}ms (wake_requested=0x{x})\n", .{
-                self,
-                effective_timeout.toMilliseconds(),
-                self.state.wake_requested.load(.monotonic),
-            });
-        }
+        const timed_out = if (should_poll) try self.backend.poll(&self.state, if (wake_flags != 0) .zero else timeout) else false;
 
         // Process async handles if the async bit was set
         if (wake_flags & LoopState.wake_async != 0) {
