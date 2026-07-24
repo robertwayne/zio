@@ -343,19 +343,36 @@ test "Mutex repeated cancellation generations under churn" {
     // many short generations instead of once. On a buggy runtime a victim
     // parks forever and victims.cancel() never returns; the watchdog turns
     // that into a prompt panic instead of a CI-level job timeout.
+    //
+    // The watchdog is progress-based, not wall-clock-based: oversubscribed CI
+    // runners have legitimately run this test for minutes while still making
+    // progress. A generation normally completes in milliseconds, so a
+    // generation counter that does not advance for 90s of counted sleep
+    // (>= 90s wall) distinguishes a parked-forever victim from a slow runner.
     var done = std.atomic.Value(bool).init(false);
+    var progress = std.atomic.Value(u64).init(0);
     const watchdog = try std.Thread.spawn(.{}, struct {
-        fn run(done_flag: *std.atomic.Value(bool)) void {
-            var waited_ms: u64 = 0;
+        fn run(done_flag: *std.atomic.Value(bool), progress_counter: *std.atomic.Value(u64)) void {
+            var last_progress: u64 = 0;
+            var stale_ms: u64 = 0;
             while (!done_flag.load(.acquire)) {
                 os.time.sleep(.fromMilliseconds(100));
-                waited_ms += 100;
-                if (waited_ms >= 120_000) {
-                    @panic("victim task parked forever: unlock's signal was lost");
+                const current = progress_counter.load(.monotonic);
+                if (current != last_progress) {
+                    last_progress = current;
+                    stale_ms = 0;
+                    continue;
+                }
+                stale_ms += 100;
+                if (stale_ms >= 90_000) {
+                    std.debug.panic(
+                        "victim task parked forever: no progress for 90s at generation {d}",
+                        .{current},
+                    );
                 }
             }
         }
-    }.run, .{&done});
+    }.run, .{ &done, &progress });
     defer {
         done.store(true, .release);
         watchdog.join();
@@ -391,6 +408,7 @@ test "Mutex repeated cancellation generations under churn" {
         for (0..8) |_| try victims.spawn(TestFn.victim, .{&mutex});
         os.time.sleep(.fromMilliseconds(1));
         victims.cancel();
+        _ = progress.fetchAdd(1, .monotonic);
     }
 
     stop.store(true, .monotonic);
