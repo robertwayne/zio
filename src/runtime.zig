@@ -647,7 +647,10 @@ pub const Executor = struct {
 
     fn parkAndSearch(self: *Executor, check_ready: bool) !void {
         const my_bit = @as(usize, 1) << self.id;
-        _ = self.runtime.idle_mask.fetchOr(my_bit, .acq_rel);
+        // seq_cst: pairs with armSearcher's idle_mask load (see there). The bit
+        // must be globally visible before the work check below, or a concurrent
+        // pusher can both miss the bit and have its push missed by the check.
+        _ = self.runtime.idle_mask.fetchOr(my_bit, .seq_cst);
         errdefer {
             const previous_bit = self.runtime.idle_mask.fetchAnd(~my_bit, .acq_rel);
             if (previous_bit & my_bit == 0) {
@@ -703,7 +706,11 @@ pub const Executor = struct {
             // Release the token before the final recheck. A concurrent
             // pusher that sees searchers == 0 can arm a fresh search instead of
             // being blocked behind a token we're about to give up anyway.
-            _ = self.runtime.searchers.cmpxchgStrong(1, 0, .acq_rel, .monotonic);
+            // seq_cst: pairs with armSearcher's searchers load. The release must
+            // be globally visible before the recheck below, or a pusher can
+            // both read the stale token (skipping its announce) and have its
+            // push missed by this recheck - a dropped wake with no retry.
+            _ = self.runtime.searchers.cmpxchgStrong(1, 0, .seq_cst, .monotonic);
             if (self.stealWork()) return;
             if (self.checkAboutForWork(check_ready, false)) self.runtime.armSearcher();
         }
@@ -1349,8 +1356,17 @@ pub const Runtime = struct {
     }
 
     fn armSearcher(self: *Runtime) void {
-        if (!self.stealingActive() or (self.idle_mask.load(.monotonic) == 0) or (self.searchers.load(.monotonic) != 0)) return;
-        if (self.searchers.cmpxchgStrong(0, 1, .acq_rel, .monotonic)) |_| return;
+        // The two early-return loads pair with the parker: an executor sets its
+        // idle bit (seq_cst RMW) and only then makes its final work check, while
+        // a pusher publishes the task and only then reads idle_mask/searchers
+        // here. Both sides run store-then-load, so with anything weaker than
+        // seq_cst each can read the other's stale value on a weakly ordered CPU
+        // and the announce is dropped: the task then sits in a queue no awake
+        // executor looks at until some poll timeout (observed as ~60s stalls on
+        // Apple Silicon). seq_cst loads are enough on the pusher side; the
+        // parker's RMWs anchor the total order.
+        if (!self.stealingActive() or (self.idle_mask.load(.seq_cst) == 0) or (self.searchers.load(.seq_cst) != 0)) return;
+        if (self.searchers.cmpxchgStrong(0, 1, .seq_cst, .monotonic)) |_| return;
 
         var candidates = self.idle_mask.load(.acquire);
         while (candidates != 0) {
