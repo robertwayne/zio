@@ -350,11 +350,11 @@ test "Mutex repeated cancellation generations under churn" {
     // generation counter that does not advance for 90s of counted sleep
     // (>= 90s wall) distinguishes a parked-forever victim from a slow runner.
     var done = std.atomic.Value(bool).init(false);
-    var progress = std.atomic.Value(u64).init(0);
+    var progress = std.atomic.Value(u32).init(0);
     const watchdog = try std.Thread.spawn(.{}, struct {
-        fn run(done_flag: *std.atomic.Value(bool), progress_counter: *std.atomic.Value(u64)) void {
-            var last_progress: u64 = 0;
-            var stale_ms: u64 = 0;
+        fn run(done_flag: *std.atomic.Value(bool), progress_counter: *std.atomic.Value(u32)) void {
+            var last_progress: u32 = 0;
+            var stale_ms: u32 = 0;
             while (!done_flag.load(.acquire)) {
                 os.time.sleep(.fromMilliseconds(100));
                 const current = progress_counter.load(.monotonic);
@@ -403,12 +403,21 @@ test "Mutex repeated cancellation generations under churn" {
     defer churners.cancel();
     for (0..2) |_| try churners.spawn(TestFn.churner, .{ &mutex, &stop });
 
-    for (0..500) |_| {
+    for (0..500) |gen| {
+        const gen_start = os.time.now(.awake);
         var victims: Group = .init;
         for (0..8) |_| try victims.spawn(TestFn.victim, .{&mutex});
         os.time.sleep(.fromMilliseconds(1));
         victims.cancel();
         _ = progress.fetchAdd(1, .monotonic);
+        // Stall telemetry: a generation normally completes in a few
+        // milliseconds; multi-second generations indicate lost wakeups that
+        // only the loop's max_wait poll timeout rescued. Print them so CI
+        // logs show the stall distribution.
+        const gen_ms = @divTrunc(os.time.now(.awake).toNanoseconds() - gen_start.toNanoseconds(), 1_000_000);
+        if (gen_ms > 5_000) {
+            std.debug.print("generation {d} took {d}ms\n", .{ gen, gen_ms });
+        }
     }
 
     stop.store(true, .monotonic);
