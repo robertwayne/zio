@@ -404,19 +404,28 @@ test "Mutex repeated cancellation generations under churn" {
     for (0..2) |_| try churners.spawn(TestFn.churner, .{ &mutex, &stop });
 
     for (0..500) |gen| {
-        const gen_start = os.time.now(.awake);
+        const t0 = os.time.now(.awake);
         var victims: Group = .init;
         for (0..8) |_| try victims.spawn(TestFn.victim, .{&mutex});
+        const t1 = os.time.now(.awake);
         os.time.sleep(.fromMilliseconds(1));
+        const t2 = os.time.now(.awake);
         victims.cancel();
+        const t3 = os.time.now(.awake);
         _ = progress.fetchAdd(1, .monotonic);
         // Stall telemetry: a generation normally completes in a few
         // milliseconds; multi-second generations indicate lost wakeups that
-        // only the loop's max_wait poll timeout rescued. Print them so CI
-        // logs show the stall distribution.
-        const gen_ms = @divTrunc(os.time.now(.awake).toNanoseconds() - gen_start.toNanoseconds(), 1_000_000);
+        // only a loop timer expiry rescued. The sub-phase split shows where
+        // the stall lives (a stuck sleep timer vs. a stranded cancel wait).
+        const gen_ms = @divTrunc(t3.toNanoseconds() - t0.toNanoseconds(), 1_000_000);
         if (gen_ms > 5_000) {
-            std.debug.print("generation {d} took {d}ms\n", .{ gen, gen_ms });
+            std.debug.print("generation {d} took {d}ms (spawn={d}ms sleep={d}ms cancel={d}ms)\n", .{
+                gen,
+                gen_ms,
+                @divTrunc(t1.toNanoseconds() - t0.toNanoseconds(), 1_000_000),
+                @divTrunc(t2.toNanoseconds() - t1.toNanoseconds(), 1_000_000),
+                @divTrunc(t3.toNanoseconds() - t2.toNanoseconds(), 1_000_000),
+            });
         }
     }
 
