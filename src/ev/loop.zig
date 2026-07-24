@@ -661,7 +661,8 @@ pub const Loop = struct {
     /// Cancel a completion directly without requiring a Cancel completion struct.
     /// This is a fire-and-forget, idempotent operation - the completion's callback will still be
     /// invoked when the operation completes (either with error.Canceled or its natural result).
-    /// Thread-safe: can be called from any thread.
+    /// Must be called on this loop's own thread. The completion may be owned by a
+    /// different loop; cross-loop cancels are routed through its cancel queue.
     pub fn cancel(self: *Loop, completion: *Completion) void {
         self.assertOwnThread();
 
