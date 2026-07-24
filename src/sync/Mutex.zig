@@ -386,7 +386,7 @@ test "Mutex repeated cancellation generations under churn" {
     defer churners.cancel();
     for (0..2) |_| try churners.spawn(TestFn.churner, .{ &mutex, &stop });
 
-    for (0..200) |_| {
+    for (0..500) |_| {
         var victims: Group = .init;
         for (0..8) |_| try victims.spawn(TestFn.victim, .{&mutex});
         os.time.sleep(.fromMilliseconds(1));
