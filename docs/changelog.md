@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- Reworked completion state tracking in the low-level `ev` API: the lifecycle phase and
+  the cancellation flags now live in a single atomic `Completion.state` word, read
+  through `Completion.loadState()`. The separate `cancel_state` field is gone; code that
+  checked `c.state == .dead` now reads `c.loadState().phase == .dead`, and cancellation
+  checks use `loadState().cancel_requested`, which stays readable from the completion's
+  callback. Canceling a timer that was already cleared is now a harmless no-op instead
+  of hitting an assertion when the queued cancel arrived.
+
+- The loop's thread-affine entry points (`Loop.add`, `Loop.cancel`, `Loop.setTimer` on
+  an armed timer, `Loop.deinit`) now assert in debug builds that they run on the thread
+  that owns the loop. `Loop.cancel` must be called on the calling thread's loop, which
+  routes the cancellation to the completion's loop; calling it on the completion's loop
+  from another thread was never safe and two internal callers doing so were fixed.
+
 - Fixed writing to a terminal on macOS crashing with an unexpected `ENXIO` error. A
   reader or writer starts in positional mode and expects the first `pread`/`pwrite` to
   fail with `ESPIPE` if the file turns out not to be seekable, which is how it learns to
