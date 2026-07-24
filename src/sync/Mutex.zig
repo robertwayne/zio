@@ -328,3 +328,76 @@ test "Mutex cancellation while parked under churn" {
     mutex.unlock();
     try std.testing.expect(churned > 0);
 }
+
+test "Mutex repeated cancellation generations under churn" {
+    if (@import("builtin").single_threaded) return error.SkipZigTest;
+
+    // Regression stress for a lost wakeup that shows up as a rare hang of the
+    // test above on weakly ordered CPUs (Apple Silicon, release mode). The
+    // suspected mechanism: yield's cancel-error path clears the awaken bit
+    // with a blind store, erasing a wake token set by unlock's pop+signal;
+    // the no_cancel wait in lockSlow's cancel path then reads a stale signal
+    // count and parks with no wake left in flight.
+    //
+    // Every canceled victim is one roll of the dice, so cancel victims in
+    // many short generations instead of once. On a buggy runtime a victim
+    // parks forever and victims.cancel() never returns; the watchdog turns
+    // that into a prompt panic instead of a CI-level job timeout.
+    var done = std.atomic.Value(bool).init(false);
+    const watchdog = try std.Thread.spawn(.{}, struct {
+        fn run(done_flag: *std.atomic.Value(bool)) void {
+            var waited_ms: u64 = 0;
+            while (!done_flag.load(.acquire)) {
+                os.time.sleep(.fromMilliseconds(100));
+                waited_ms += 100;
+                if (waited_ms >= 120_000) {
+                    @panic("victim task parked forever: unlock's signal was lost");
+                }
+            }
+        }
+    }.run, .{&done});
+    defer {
+        done.store(true, .release);
+        watchdog.join();
+    }
+
+    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
+    defer runtime.deinit();
+
+    var mutex = Mutex.init;
+    var stop = std.atomic.Value(bool).init(false);
+
+    const TestFn = struct {
+        fn churner(mtx: *Mutex, stop_flag: *std.atomic.Value(bool)) !void {
+            while (!stop_flag.load(.monotonic)) {
+                try mtx.lock();
+                mtx.unlock();
+            }
+        }
+        fn victim(mtx: *Mutex) !void {
+            while (true) {
+                try mtx.lock();
+                mtx.unlock();
+            }
+        }
+    };
+
+    var churners: Group = .init;
+    defer churners.cancel();
+    for (0..2) |_| try churners.spawn(TestFn.churner, .{ &mutex, &stop });
+
+    for (0..200) |_| {
+        var victims: Group = .init;
+        for (0..8) |_| try victims.spawn(TestFn.victim, .{&mutex});
+        os.time.sleep(.fromMilliseconds(1));
+        victims.cancel();
+    }
+
+    stop.store(true, .monotonic);
+    try churners.wait();
+    try std.testing.expect(!churners.hasFailed());
+
+    // The lock must still work after all the canceled waiters left.
+    try mutex.lock();
+    mutex.unlock();
+}
