@@ -328,3 +328,118 @@ test "Mutex cancellation while parked under churn" {
     mutex.unlock();
     try std.testing.expect(churned > 0);
 }
+
+test "Mutex repeated cancellation generations under churn" {
+    if (@import("builtin").single_threaded) return error.SkipZigTest;
+
+    // Regression stress for lost wakeups on weakly ordered CPUs (both found
+    // via this test hanging or stalling on Apple Silicon in release mode):
+    //
+    // 1. yield's cancel-error path used to clear the awaken bit with a blind
+    //    store, erasing a wake token set by unlock's pop+signal; the
+    //    no_cancel wait in lockSlow's cancel path then read a stale signal
+    //    count and parked forever with no wake left in flight.
+    // 2. the scheduler's idle/searcher announce handshake used
+    //    weaker-than-seq_cst orderings, so a pusher could drop its announce
+    //    while the idle executor's final work check predated the push,
+    //    stranding a runnable task until an unrelated poll timeout (~60s
+    //    stalls under this churn pattern).
+    //
+    // Every canceled victim is one roll of the dice, so cancel victims in
+    // many short generations instead of once. On a buggy runtime a victim
+    // parks forever and victims.cancel() never returns; the watchdog turns
+    // that into a prompt panic instead of a CI-level job timeout.
+    //
+    // The watchdog is progress-based, not wall-clock-based: oversubscribed CI
+    // runners have legitimately run this test for minutes while still making
+    // progress. A generation normally completes in milliseconds, so a
+    // generation counter that does not advance for 90s of counted sleep
+    // (>= 90s wall) distinguishes a parked-forever victim from a slow runner.
+    var done = std.atomic.Value(bool).init(false);
+    var progress = std.atomic.Value(u32).init(0);
+    const watchdog = try std.Thread.spawn(.{}, struct {
+        fn run(done_flag: *std.atomic.Value(bool), progress_counter: *std.atomic.Value(u32)) void {
+            var last_progress: u32 = 0;
+            var stale_ms: u32 = 0;
+            while (!done_flag.load(.acquire)) {
+                os.time.sleep(.fromMilliseconds(100));
+                const current = progress_counter.load(.monotonic);
+                if (current != last_progress) {
+                    last_progress = current;
+                    stale_ms = 0;
+                    continue;
+                }
+                stale_ms += 100;
+                if (stale_ms >= 90_000) {
+                    std.debug.panic(
+                        "victim task parked forever: no progress for 90s at generation {d}",
+                        .{current},
+                    );
+                }
+            }
+        }
+    }.run, .{ &done, &progress });
+    defer {
+        done.store(true, .release);
+        watchdog.join();
+    }
+
+    const runtime = try Runtime.init(std.testing.allocator, .{ .executors = .exact(2) });
+    defer runtime.deinit();
+
+    var mutex = Mutex.init;
+    var stop = std.atomic.Value(bool).init(false);
+
+    const TestFn = struct {
+        fn churner(mtx: *Mutex, stop_flag: *std.atomic.Value(bool)) !void {
+            while (!stop_flag.load(.monotonic)) {
+                try mtx.lock();
+                mtx.unlock();
+            }
+        }
+        fn victim(mtx: *Mutex) !void {
+            while (true) {
+                try mtx.lock();
+                mtx.unlock();
+            }
+        }
+    };
+
+    var churners: Group = .init;
+    defer churners.cancel();
+    for (0..2) |_| try churners.spawn(TestFn.churner, .{ &mutex, &stop });
+
+    for (0..500) |gen| {
+        const t0 = os.time.now(.awake);
+        var victims: Group = .init;
+        for (0..8) |_| try victims.spawn(TestFn.victim, .{&mutex});
+        const t1 = os.time.now(.awake);
+        os.time.sleep(.fromMilliseconds(1));
+        const t2 = os.time.now(.awake);
+        victims.cancel();
+        const t3 = os.time.now(.awake);
+        _ = progress.fetchAdd(1, .monotonic);
+        // Stall telemetry: a generation normally completes in a few
+        // milliseconds; multi-second generations indicate lost wakeups that
+        // only a loop timer expiry rescued. The sub-phase split shows where
+        // the stall lives (a stuck sleep timer vs. a stranded cancel wait).
+        const gen_ms = @divTrunc(t3.toNanoseconds() - t0.toNanoseconds(), 1_000_000);
+        if (gen_ms > 5_000) {
+            std.debug.print("generation {d} took {d}ms (spawn={d}ms sleep={d}ms cancel={d}ms)\n", .{
+                gen,
+                gen_ms,
+                @divTrunc(t1.toNanoseconds() - t0.toNanoseconds(), 1_000_000),
+                @divTrunc(t2.toNanoseconds() - t1.toNanoseconds(), 1_000_000),
+                @divTrunc(t3.toNanoseconds() - t2.toNanoseconds(), 1_000_000),
+            });
+        }
+    }
+
+    stop.store(true, .monotonic);
+    try churners.wait();
+    try std.testing.expect(!churners.hasFailed());
+
+    // The lock must still work after all the canceled waiters left.
+    try mutex.lock();
+    mutex.unlock();
+}
