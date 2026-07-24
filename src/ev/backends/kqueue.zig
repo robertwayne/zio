@@ -192,7 +192,21 @@ pub fn wake(self: *Self, state: *LoopState) void {
         .data = 0,
         .udata = 0,
     }};
-    _ = std.c.kevent(self.kqueue_fd, &changes, 1, &.{}, 0, null);
+    // A silently failed trigger strands the sleeping loop until its poll
+    // timeout: wake_requested is already set, so later wakers skip the
+    // syscall. Retry EINTR; anything else means the waker is broken and
+    // every subsequent wake would be lost, so fail loudly.
+    while (true) {
+        const rc = std.c.kevent(self.kqueue_fd, &changes, 1, &.{}, 0, null);
+        switch (posix.errno(rc)) {
+            .SUCCESS => return,
+            .INTR => {
+                log.warn("kqueue: waker NOTE_TRIGGER interrupted (EINTR), retrying", .{});
+                continue;
+            },
+            else => |err| std.debug.panic("kqueue: waker NOTE_TRIGGER failed: {t}", .{err}),
+        }
+    }
 }
 
 /// Arm/update/disarm the given wall clock's EVFILT_TIMER to an absolute deadline

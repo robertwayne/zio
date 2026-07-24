@@ -111,12 +111,35 @@ pub fn deinit(self: *Self) void {
 pub fn wake(self: *Self, state: *LoopState) void {
     _ = state;
     const byte: [1]u8 = .{1};
+    // A silently failed write strands the sleeping loop until its poll
+    // timeout: wake_requested is already set, so later wakers skip the
+    // syscall. A full pipe is fine (the pending bytes already make the
+    // waker fd readable); anything else means the waker is broken and
+    // every subsequent wake would be lost, so fail loudly.
     switch (builtin.os.tag) {
         .windows => {
-            _ = net.send(self.waker_write_fd, &[_]net.iovec_const{net.iovecConstFromSlice(&byte)}, .{}) catch {};
+            _ = net.send(self.waker_write_fd, &[_]net.iovec_const{net.iovecConstFromSlice(&byte)}, .{}) catch |err| switch (err) {
+                error.WouldBlock => {},
+                else => std.debug.panic("poll: waker send failed: {t}", .{err}),
+            };
         },
         else => {
-            _ = fs.write(self.waker_write_fd, &byte) catch {};
+            // Raw write, not fs.write: the waker needs no cancel bracket and
+            // fs.write's internal EINTR retry would hide the interruption we
+            // want to observe.
+            while (true) {
+                const rc = posix.system.write(self.waker_write_fd, &byte, byte.len);
+                switch (posix.errno(rc)) {
+                    .SUCCESS => break,
+                    .INTR => {
+                        log.warn("poll: waker write interrupted (EINTR), retrying", .{});
+                        continue;
+                    },
+                    // Full pipe: the pending bytes already make the fd readable.
+                    .AGAIN => break,
+                    else => |err| std.debug.panic("poll: waker write failed: {t}", .{err}),
+                }
+            }
         },
     }
 }
